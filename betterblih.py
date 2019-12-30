@@ -569,7 +569,7 @@ exit, quit, logout         exit BetterBlih"""
                         p_name = input("Name of the repository: ")
 
                     repo_create(blih, p_name)
-                    repo_setacl(blih, p_name, "ramassage-tek", "r")
+                    repo_setacl(blih, p_name, ["ramassage-tek"], "r")
                     repo_getacl(blih, p_name)
 
                 else:
