@@ -2,7 +2,7 @@
 
 """
     BetterBlih
-    Copyright (C) 2019  akrocynova
+    Copyright (C) 2019-2020  akrocynova
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -20,11 +20,13 @@
 """
 
 from sys import exit
-from signal import signal, SIGINT, SIGTERM
+from os import getenv
 from json import loads as json_load, dumps as json_dump
 from getpass import getpass
 from hashlib import sha512
 from requests import request as http_request
+from requests.exceptions import SSLError
+from urllib3 import disable_warnings as disable_ssl_warnings
 from datetime import datetime
 import hmac
 
@@ -38,11 +40,16 @@ class acolor:
     bold   = '\033[1m'
 
 class BetterBlih:
-    def __init__(self, blih_url: str = "https://blih.epitech.eu", debug: bool = False):
+    def __init__(self, blih_url: str = "https://blih.epitech.eu", verify_ssl: bool = True, debug: bool = False):
+        self.version = "1.1"
         self.blih_url = blih_url
         self.debug = debug
+        self.verify_ssl = verify_ssl
         self.user_login = None
         self.user_token = None
+
+        if not verify_ssl:
+            disable_ssl_warnings()
 
     def logged_in(self):
         return self.user_token != None
@@ -70,7 +77,11 @@ class BetterBlih:
             digestmod=sha512
             )
         if data != None:
-            sig.update(json_dump(data, indent=4, sort_keys=True).encode("utf-8"))
+            sig.update(json_dump(
+                data,
+                indent=4,
+                sort_keys=True
+                ).encode("utf-8"))
 
         signed_data = {
             "user": self.user_login,
@@ -86,16 +97,22 @@ class BetterBlih:
 
         try:
             data = self.sign_data(data)
-            if self.debug : print(f"[DEBUG] {method} request to {req_url} with data:\n        {data.decode('utf-8')}")
+            if self.debug:
+                print(f"{method} request to {req_url} with data:\n{data.decode('utf-8')}")
 
             req = http_request(
                 method,
                 req_url,
                 data=data,
+                verify=self.verify_ssl,
                 headers={
                     "Content-Type": "application/json",
-                    "User-Agent": "betterblih-1.0",
+                    "User-Agent": f"betterblih-{self.version}",
                 })
+
+        except SSLError as e:
+            print(f"SSL error: {e}")
+            return None
 
         except Exception as e:
             print(f"Blih request error: {e}")
@@ -434,11 +451,16 @@ def sshkey_delete(_blih: BetterBlih, key: str = None):
         print(f"{acolor.red}{r[1]}{acolor.reset}")
 
 if __name__ == "__main__":
+    from signal import signal, SIGINT
+    from argparse import ArgumentParser
+    from time import sleep
+    import readline
+
     def exit_signal(sig, frame):
+        print()
         exit(2)
 
     signal(SIGINT, exit_signal)
-    signal(SIGTERM, exit_signal)
 
     help_message = """help                       show this message
 
@@ -446,7 +468,7 @@ list
     repos                  display a list of your repositories
     sshkeys [-f]           display a list of your SSH keys
 
-    -f                     (optionnal) displays more information
+    -f                     (optionnal) display more information
 
 repo
     create [repo]          create a repository
@@ -467,35 +489,92 @@ whoami                     display your login
 
 exit, quit, logout         exit BetterBlih"""
 
-    from argparse import ArgumentParser
-
     arg_parser = ArgumentParser(description="BetterBlih")
-    arg_parser.add_argument("-d", "--debug", dest="debug", action="store_true", help="Display debugging information")
-    arg_parser.add_argument("-u", "--url", dest="blih_url", default=None, type=str, help="Specify a custom Blih URL (without trailing /)")
+    arg_parser.add_argument(
+        "-d", "--debug",
+        dest="debug",
+        action="store_true",
+        help="Display debugging information"
+        )
+    arg_parser.add_argument(
+        "-u", "--url",
+        dest="blih_url",
+        default="https://blih.epitech.eu",
+        type=str,
+        help="Specify a custom Blih URL"
+        )
+    arg_parser.add_argument(
+        "--no-env",
+        dest="no_env",
+        action="store_true",
+        help="Disable grabbing information from the environment"
+        )
+    arg_parser.add_argument(
+        "--max-retry",
+        dest="max_retry",
+        default=3,
+        type=int,
+        help="Maximum authentication attempts before exitting (default: 3)"
+        )
+    arg_parser.add_argument(
+        "--infinite-retry",
+        dest="infinite_retry",
+        action="store_true",
+        help="Infinite authentication attempts"
+        )
+    arg_parser.add_argument(
+        "--no-verify-ssl",
+        dest="no_verify_ssl",
+        action="store_true",
+        help="Disable SSL certificate verification"
+        )
     args = arg_parser.parse_args()
 
-    login = input("Epitech login: ")
-    password = getpass(prompt="Epitech password: ")
+    if args.blih_url.endswith("/"):
+        args.blih_url = args.blih_url.rstrip("/")
 
-    if args.blih_url == None:
-        blih = BetterBlih(debug=args.debug)
+    if args.no_verify_ssl:
+        if not input(f"{acolor.red}{acolor.bold}Warning{acolor.reset}{acolor.red}: Turning off SSL verification can be dangerous, are you sure? [y/N]{acolor.reset} ").lower() in ["yes", "y"]:
+            exit(1)
+
+    if args.debug:
+        print(f"Using Blih URL: {args.blih_url}")
+
+
+    blih = BetterBlih(blih_url=args.blih_url, debug=args.debug, verify_ssl=not args.no_verify_ssl)
+
+    login = getenv("BETTERBLIH_LOGIN", default=None)
+    if login == None or args.no_env:
+        login = input("Epitech login: ")
     else:
-        blih = BetterBlih(blih_url=args.blih_url, debug=args.debug)
+        print(f"Login as: {login}")
 
-    print("Verifying credentials...", end='\r')
-    if not blih.login(login, password):
-        print(f"{acolor.red}Authentication failed, check your login and password.{acolor.reset}")
-        exit(1)
+    retry = 0
+    while not blih.logged_in():
+        password = getpass(prompt="Epitech password: ")
+        print("...", end='\r')
+        if not blih.login(login, password):
+            retry += 1
+            if retry < args.max_retry or args.infinite_retry:
+                print(f"{acolor.red}Authentication failed, check your login and password.{acolor.reset}")
+                sleep(1)
+            else:
+                print(f"{acolor.red}{retry} failed attempt{'s' if retry > 1 else ''}, exitting.{acolor.reset}")
+                exit(1)
 
-    print(f"{acolor.green}Authenticated as{acolor.bold} {blih.user_login}{acolor.reset}.")
+    print(f"{acolor.green}Authenticated as {acolor.bold}{blih.user_login}{acolor.reset}.")
     print(f"Feeling lost? Enter '{acolor.blue}help{acolor.reset}'.\n")
 
+    readline.clear_history()
+    prompt = f"{acolor.red if args.no_verify_ssl else acolor.yellow}betterblih $>{acolor.reset} "
     while blih.logged_in():
         try:
-            params = input(f"{acolor.yellow}betterblih $>{acolor.reset} ").strip().split(' ')
-            param_count = len(params)
-            if param_count == 0:
+            user_input = input(prompt).strip()
+            if len(user_input) == 0:
                 continue
+
+            params = user_input.split()
+            param_count = len(params)
             command = params[0]
 
             if command == "exit" or command == "quit" or command == "logout":
@@ -505,7 +584,10 @@ exit, quit, logout         exit BetterBlih"""
                 print(help_message)
 
             elif command == "list":
-                if params[1] == "repos":
+                if param_count < 2:
+                    continue
+
+                elif params[1] == "repos":
                     list_repos(blih)
 
                 elif params[1] == "sshkeys":
@@ -519,7 +601,10 @@ exit, quit, logout         exit BetterBlih"""
                     raise Exception(f"{acolor.red}Invalid option:{acolor.blue} {params[1]}{acolor.reset}")
 
             elif command == "repo":
-                if params[1] == "create":
+                if param_count < 2:
+                    continue
+
+                elif params[1] == "create":
                     if param_count >= 3:
                         repo_create(blih, params[2])
                     else:
@@ -576,7 +661,10 @@ exit, quit, logout         exit BetterBlih"""
                     raise Exception(f"{acolor.red}Invalid option:{acolor.blue} {params[1]}{acolor.reset}")
 
             elif command == "sshkey":
-                if params[1] == "upload":
+                if param_count < 2:
+                    continue
+
+                elif params[1] == "upload":
                     if param_count >= 3:
                         sshkey_upload(blih, params[2])
                     else:
